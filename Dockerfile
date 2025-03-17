@@ -4,8 +4,8 @@ FROM node:20-slim
 # Create app directory
 WORKDIR /usr/src/app
 
-# Copy package files
-COPY package.json ./
+# Copy package files and TypeScript config
+COPY package.json tsconfig.json ./
 
 # Install dependencies and build
 RUN npm install && \
