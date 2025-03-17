@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  twitter-bot:
+    build: .
+    container_name: twitter-bot
+    ports:
+      - "8080:8080"  # Map container port 8080 to host port 8080
+    volumes:
+      - ./data:/usr/src/app/data
+    environment:
+      # Twitter v1 credentials (for password auth)
+      - TWITTER_USERNAME=${TWITTER_USERNAME}
+      - TWITTER_PASSWORD=${TWITTER_PASSWORD}
+      - TWITTER_EMAIL=${TWITTER_EMAIL}
+      
+      # Twitter v2 API credentials
+      - TWITTER_API_KEY=${TWITTER_API_KEY}
+      - TWITTER_API_SECRET_KEY=${TWITTER_API_SECRET_KEY}
+      - TWITTER_ACCESS_TOKEN=${TWITTER_ACCESS_TOKEN}
+      - TWITTER_ACCESS_TOKEN_SECRET=${TWITTER_ACCESS_TOKEN_SECRET}
+      
+      # Other API keys
+      - ELFA_API_KEY=${ELFA_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      
+      # App configuration
+      - DATA_DIR=/usr/src/app/data
+      - PORT=8080
+      - NODE_ENV=production
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s 
