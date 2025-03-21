@@ -359,28 +359,58 @@ async function initializeTwitterClients() {
   console.log('Initializing Twitter clients...');
   
   try {
-    // Initialize v2 client
-    const me = await twitterClient.v2.me();
-    if (!me.data?.username) {
-      throw new Error('Failed to get v2 profile username');
+    // Initialize v2 client first
+    try {
+      const me = await twitterClient.v2.me();
+      if (!me.data?.username) {
+        throw new Error('Failed to get v2 profile username');
+      }
+      console.log('Successfully initialized Twitter v2 client for:', me.data.username);
+    } catch (v2Error) {
+      console.error('Error initializing v2 client:', v2Error);
+      // Don't throw here, continue with v1 auth
     }
-    console.log('Successfully initialized Twitter v2 client for:', me.data.username);
 
-    // Initialize v1 client with password auth
-    await passwordScraper.login(
-      twitterAccount.username,
-      process.env.TWITTER_PASSWORD!,
-      process.env.TWITTER_EMAIL!
-    );
-    
-    const profile = await passwordScraper.me();
-    if (!profile?.username) {
-      throw new Error('Failed to get v1 profile username');
+    // Initialize v1 client with password auth and retry logic
+    let v1AuthSuccess = false;
+    let retryCount = 0;
+    const maxRetries = 3;
+    const retryDelay = 30000; // 30 seconds
+
+    while (!v1AuthSuccess && retryCount < maxRetries) {
+      try {
+        await passwordScraper.login(
+          twitterAccount.username,
+          process.env.TWITTER_PASSWORD!,
+          process.env.TWITTER_EMAIL!
+        );
+        
+        // Add delay after login
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        const profile = await passwordScraper.me();
+        if (!profile?.username) {
+          throw new Error('Failed to get v1 profile username');
+        }
+        
+        console.log('Successfully initialized Twitter v1 client for:', profile.username);
+        v1AuthSuccess = true;
+        sessionState.isAuthenticated = true;
+        sessionState.lastLoginTime = new Date();
+        
+      } catch (v1Error) {
+        retryCount++;
+        console.error(`V1 auth attempt ${retryCount} failed:`, v1Error);
+        
+        if (retryCount < maxRetries) {
+          console.log(`Waiting ${retryDelay/1000} seconds before retrying v1 auth...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        } else {
+          console.error('Max v1 auth retries reached');
+          throw v1Error;
+        }
+      }
     }
-    console.log('Successfully initialized Twitter v1 client for:', profile.username);
-    
-    sessionState.isAuthenticated = true;
-    sessionState.lastLoginTime = new Date();
     
   } catch (error) {
     console.error('Error initializing Twitter clients:', error instanceof Error ? error.message : 'Unknown error');
@@ -397,31 +427,53 @@ async function postToTwitter(content: string): Promise<void> {
   }
 
   const authMethod = await getAvailableAuthMethod();
+  let retryCount = 0;
+  const maxRetries = 3;
+  const retryDelay = 30000; // 30 seconds
   
-  try {
-    if (authMethod === 'v2') {
-      await twitterClient.v2.tweet(content);
-      console.log('Successfully posted using v2 API');
-      twitterAccount.apiAuthPosts++;
-      twitterAccount.lastApiPostTime = new Date();
-    } else {
-      // Verify password auth session before posting
-      const profile = await passwordScraper.me();
-      if (!profile?.username) {
-        throw new Error('Password auth session expired');
+  while (retryCount < maxRetries) {
+    try {
+      if (authMethod === 'v2') {
+        await twitterClient.v2.tweet(content);
+        console.log('Successfully posted using v2 API');
+        twitterAccount.apiAuthPosts++;
+        twitterAccount.lastApiPostTime = new Date();
+        break;
+      } else {
+        // Verify password auth session before posting
+        const profile = await passwordScraper.me();
+        if (!profile?.username) {
+          throw new Error('Password auth session expired');
+        }
+        
+        await passwordScraper.sendTweet(content);
+        console.log('Successfully posted using v1 password auth');
+        break;
+      }
+    } catch (error) {
+      retryCount++;
+      console.error(`Posting attempt ${retryCount} failed:`, error);
+      
+      if (error instanceof Error && 
+          (error.message.includes('auth') || 
+           error.message.includes('login') || 
+           error.message.includes('session'))) {
+        sessionState.isAuthenticated = false;
+        // Try to refresh session before next retry
+        await checkAndRefreshSession();
       }
       
-      await passwordScraper.sendTweet(content);
-      console.log('Successfully posted using v1 password auth');
+      if (retryCount < maxRetries) {
+        console.log(`Waiting ${retryDelay/1000} seconds before retrying post...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      } else {
+        console.error('Max posting retries reached');
+        throw error;
+      }
     }
-    
-    bot.lastAuthMethod = authMethod;
-    
-  } catch (error) {
-    console.error('Error posting to Twitter:', error instanceof Error ? error.message : 'Unknown error');
-    sessionState.isAuthenticated = false; // Force re-login on next attempt
-    throw error;
   }
+  
+  bot.lastAuthMethod = authMethod;
 }
 
 // Export the main function instead of running it directly
