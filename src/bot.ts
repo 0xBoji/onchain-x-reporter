@@ -83,6 +83,21 @@ export const bot = {
   lastAuthMethod: null as AuthMethod | null
 };
 
+// Add session management
+interface SessionState {
+  lastLoginTime: Date;
+  isAuthenticated: boolean;
+  loginAttempts: number;
+  maxLoginAttempts: number;
+}
+
+const sessionState: SessionState = {
+  lastLoginTime: new Date(),
+  isAuthenticated: false,
+  loginAttempts: 0,
+  maxLoginAttempts: 3
+};
+
 async function getTimestamps(daysAgo: number = 7): Promise<{ from: number; to: number }> {
   // Make sure days_ago is no more than 180 days (6 months) to avoid API error
   daysAgo = Math.min(daysAgo, 180);
@@ -309,17 +324,47 @@ async function getAvailableAuthMethod(): Promise<AuthMethod> {
   return bot.lastAuthMethod === 'v2' ? 'v1' : 'v2';
 }
 
+async function checkAndRefreshSession(): Promise<boolean> {
+  try {
+    // Check if we need to refresh login (every 12 hours)
+    const now = new Date();
+    const hoursSinceLastLogin = (now.getTime() - sessionState.lastLoginTime.getTime()) / (1000 * 60 * 60);
+    
+    if (hoursSinceLastLogin >= 12 || !sessionState.isAuthenticated) {
+      console.log('Session expired or not authenticated. Attempting to login...');
+      await initializeTwitterClients();
+      sessionState.lastLoginTime = now;
+      sessionState.isAuthenticated = true;
+      sessionState.loginAttempts = 0;
+      return true;
+    }
+    
+    return sessionState.isAuthenticated;
+  } catch (error) {
+    console.error('Error refreshing session:', error);
+    sessionState.isAuthenticated = false;
+    sessionState.loginAttempts++;
+    
+    if (sessionState.loginAttempts >= sessionState.maxLoginAttempts) {
+      console.error('Max login attempts reached. Waiting for 30 minutes before retrying...');
+      await new Promise(resolve => setTimeout(resolve, 30 * 60 * 1000));
+      sessionState.loginAttempts = 0;
+    }
+    
+    return false;
+  }
+}
+
 async function initializeTwitterClients() {
   console.log('Initializing Twitter clients...');
   
   try {
     // Initialize v2 client
     const me = await twitterClient.v2.me();
-    if (me.data?.username) {
-      console.log('Successfully initialized Twitter v2 client for:', me.data.username);
-    } else {
+    if (!me.data?.username) {
       throw new Error('Failed to get v2 profile username');
     }
+    console.log('Successfully initialized Twitter v2 client for:', me.data.username);
 
     // Initialize v1 client with password auth
     await passwordScraper.login(
@@ -329,19 +374,28 @@ async function initializeTwitterClients() {
     );
     
     const profile = await passwordScraper.me();
-    if (profile?.username) {
-      console.log('Successfully initialized Twitter v1 client for:', profile.username);
-    } else {
+    if (!profile?.username) {
       throw new Error('Failed to get v1 profile username');
     }
+    console.log('Successfully initialized Twitter v1 client for:', profile.username);
+    
+    sessionState.isAuthenticated = true;
+    sessionState.lastLoginTime = new Date();
     
   } catch (error) {
     console.error('Error initializing Twitter clients:', error instanceof Error ? error.message : 'Unknown error');
+    sessionState.isAuthenticated = false;
     throw error;
   }
 }
 
 async function postToTwitter(content: string): Promise<void> {
+  // Check session before posting
+  const isSessionValid = await checkAndRefreshSession();
+  if (!isSessionValid) {
+    throw new Error('Failed to establish valid session');
+  }
+
   const authMethod = await getAvailableAuthMethod();
   
   try {
@@ -351,15 +405,21 @@ async function postToTwitter(content: string): Promise<void> {
       twitterAccount.apiAuthPosts++;
       twitterAccount.lastApiPostTime = new Date();
     } else {
+      // Verify password auth session before posting
+      const profile = await passwordScraper.me();
+      if (!profile?.username) {
+        throw new Error('Password auth session expired');
+      }
+      
       await passwordScraper.sendTweet(content);
       console.log('Successfully posted using v1 password auth');
     }
     
-    // Update the last used auth method
     bot.lastAuthMethod = authMethod;
     
   } catch (error) {
     console.error('Error posting to Twitter:', error instanceof Error ? error.message : 'Unknown error');
+    sessionState.isAuthenticated = false; // Force re-login on next attempt
     throw error;
   }
 }
@@ -376,6 +436,14 @@ export async function main() {
 
     while (true) {
       try {
+        // Check session status
+        const isSessionValid = await checkAndRefreshSession();
+        if (!isSessionValid) {
+          console.log('Session invalid, retrying in 5 minutes...');
+          await new Promise(resolve => setTimeout(resolve, 5 * 60 * 1000));
+          continue;
+        }
+
         const canPost = await getAvailableAuthMethod();
         if (!canPost) {
           console.log('Daily posting limits reached. Waiting for reset...');
@@ -432,6 +500,15 @@ export async function main() {
       } catch (error) {
         bot.lastError = error instanceof Error ? error.message : 'Unknown error';
         console.error('Error in main loop:', error);
+        
+        // If error is authentication related, force session refresh
+        if (error instanceof Error && 
+            (error.message.includes('auth') || 
+             error.message.includes('login') || 
+             error.message.includes('session'))) {
+          sessionState.isAuthenticated = false;
+        }
+        
         console.log('Error occurred, waiting 5 minutes before retry...');
         await new Promise(resolve => setTimeout(resolve, 5 * 60 * 1000));
       }
